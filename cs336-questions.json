@@ -1,146 +1,162 @@
 [
   {
-    "category": "实现与张量",
-    "question": "Embedding 到底是在算什么？为什么不直接继承 nn.Embedding？",
-    "answer": [
-      "Embedding 本质上是一张可训练的查找表。词表大小为 V、维度为 D 时，表的形状是 (V, D)；输入 token_ids 的形状是 (B, T)，查表后就是 (B, T, D)。",
-      "如果自己持有这张表、自己实现 forward，继承 nn.Module 并把权重注册为 nn.Parameter 即可。若继承 nn.Embedding，就要按它的构造函数传入词表大小和维度。这里容易混淆的是“使用现成层”和“自己实现这个层”。"
-    ],
-    "code": "E[token_ids]  # (B, T) → (B, T, D)"
+    "slug": "embedding",
+    "title": "Is an embedding layer doing any computation?",
+    "motivation": "I got stuck on the constructor before reaching the actual model. Was I using an existing embedding layer, or implementing one?",
+    "intuition": "An embedding is a trainable lookup table. With V tokens and width D, its weight has shape (V, D). Indexing it with token IDs of shape (B, T) produces (B, T, D). It is also equivalent to multiplying one-hot vectors by that table, without constructing the one-hot vectors.",
+    "takeaway": "The useful distinction is ownership: a custom nn.Module registers its own Parameter; nn.Embedding already does that work. A constructor error says nothing about the quality of the learned representation.",
+    "code": "E[token_ids]  # (B, T) -> (B, T, D)",
+    "reading": "PyTorch: Embedding",
+    "url": "https://docs.pytorch.org/docs/stable/generated/torch.nn.Embedding.html"
   },
   {
-    "category": "实现与张量",
-    "question": "Linear(3, 2) 的权重为什么是 (2, 3)，不是 (3, 2)？",
-    "answer": [
-      "构造参数描述的是输入维度和输出维度；权重的存储顺序是另一回事。每个输出单元需要 3 个输入权重，2 个输出单元就组成 2 行、3 列。",
-      "如果输入按行存放，x 是 (..., 3)，前向计算 x @ W.T，输出就是 (..., 2)。判断有没有写反，最好把一次矩阵乘法的形状展开，而不是死记参数名。"
-    ],
-    "code": "(..., 3) @ (3, 2) → (..., 2)"
+    "slug": "linear-shapes",
+    "title": "Why does Linear(3, 2) store a (2, 3) matrix?",
+    "motivation": "The argument order and the weight shape looked contradictory when I connected the feed-forward layers.",
+    "intuition": "The arguments describe a transformation from 3 inputs to 2 outputs. Each output needs three weights, so there are two rows of three weights. With row-vector inputs, forward uses the transpose.",
+    "takeaway": "Writing out one multiplication was more useful than memorizing the convention. It also made the two expansion projections and the contraction projection in SwiGLU much easier to check.",
+    "code": "(..., 3) @ (3, 2) -> (..., 2)",
+    "reading": "PyTorch: Linear",
+    "url": "https://docs.pytorch.org/docs/stable/generated/torch.nn.Linear.html"
   },
   {
-    "category": "实现与张量",
-    "question": "SwiGLU 有三个矩阵，它们分别在做什么？",
-    "answer": [
-      "两个矩阵把同一个输入从 D 投到 F：一个分支经过 SiLU，作为门控信号；另一个分支提供被调节的内容。两者逐元素相乘后，第三个矩阵把 F 投回 D。",
-      "因此 w1 和 w3 的层构造都是 Linear(D, F)，w2 是 Linear(F, D)。门控不是选出一个离散 token，也不是 attention；它是在特征维度调节信息。"
-    ],
-    "code": "out = W2(SiLU(W1(x)) * W3(x))"
+    "slug": "swiglu",
+    "title": "Why does SwiGLU need three matrices?",
+    "motivation": "The feed-forward block suddenly had two input projections instead of one. I wanted to know what the extra branch was buying.",
+    "intuition": "Both branches expand D features to F features. One passes through SiLU and gates the other by elementwise multiplication. A third projection maps the resulting F features back to D.",
+    "takeaway": "The gate is a continuous feature-wise modulation, not a choice of tokens or a miniature attention layer. Thinking of one branch as content and the other as its modulation makes the shape bookkeeping natural.",
+    "code": "y = W2(SiLU(W1(x)) * W3(x))",
+    "reading": "GLU Variants Improve Transformer",
+    "url": "https://arxiv.org/abs/2002.05202"
   },
   {
-    "category": "损失与数值",
-    "question": "交叉熵里为什么有两个求和？one-hot 不是已经消掉求和了吗？",
-    "answer": [
-      "one-hot 只让“对类别加权的交叉熵求和”剩下正确类别那一项。正确类别的概率仍由 softmax 定义，而 softmax 的分母要对整个词表求和。",
-      "此外，多 token 训练还要把各个预测位置的损失求和或平均。词表轴 V 上的归一化，与 B×T 个位置上的平均，是两件事。"
-    ],
-    "code": "loss(position) = logsumexp(logits) - logits[target]"
+    "slug": "cross-entropy",
+    "title": "Why are there still two sums in cross-entropy?",
+    "motivation": "One-hot targets collapse the sum over classes. So why did my implementation still need a vocabulary reduction and a mean over positions?",
+    "intuition": "The target selects one log probability, but that probability still contains the softmax normalizer over all vocabulary candidates. After computing one loss per position, training averages those losses over the batch and sequence.",
+    "takeaway": "These reductions answer different questions: how much probability belongs to the correct token, and how to aggregate prediction errors. Keeping the vocabulary axis separate from the position axes prevents a surprising number of bugs.",
+    "code": "loss_at_position = logsumexp(logits) - logits[target]",
+    "reading": "CS336: Language Modeling from Scratch",
+    "url": "https://cs336.stanford.edu/spring2025/"
   },
   {
-    "category": "损失与数值",
-    "question": "为什么 logits[:, target] 不是“每一行取正确的那个词”？",
-    "answer": [
-      "它的含义是：在每一行都取 target 里的所有列。假设 logits 是 (3, 5)，target 是 [1, 0, 4]，结果会是 (3, 3)，而不是三个数。",
-      "真正需要的是 (0,1)、(1,0)、(2,4) 这三个坐标。把行号和列号配对，或沿词表轴 gather，才是每个位置取自己的目标。"
-    ],
-    "code": "logits[torch.arange(3), target]  # shape: (3,)"
+    "slug": "paired-indexing",
+    "title": "Why is logits[:, targets] the wrong selection?",
+    "motivation": "I wanted one correct-token score per row. Instead, indexing silently gave me a whole matrix.",
+    "intuition": "For logits shaped (3, 5) and targets [1, 0, 4], this expression selects all three target columns from every row. The result is (3, 3). The intended coordinates are (0, 1), (1, 0), and (2, 4).",
+    "takeaway": "The intuition is paired coordinates, not a rectangular slice. Once I drew the three selected cells on paper, advanced indexing stopped looking mysterious.",
+    "code": "logits[torch.arange(3), targets]  # three scores",
+    "reading": "NumPy: Advanced indexing",
+    "url": "https://numpy.org/doc/stable/user/basics.indexing.html#advanced-indexing"
   },
   {
-    "category": "损失与数值",
-    "question": "keepdim=True 到底保留了什么？",
-    "answer": [
-      "它保留被归约的轴，但把长度变成 1。例如 (S, V) 沿词表取最大值，保留维度得到 (S, 1)，不保留则得到 (S,)。",
-      "广播从最右边对齐。(S, 1) 可以自然地从每一行的 V 个元素中减去一个数；(S,) 会尝试对齐最后的 V 轴，可能报错，也可能在维度恰好相等时悄悄算错。"
-    ],
-    "code": "shifted = logits - logits.amax(dim=-1, keepdim=True)"
+    "slug": "keepdim",
+    "title": "What is keepdim actually keeping?",
+    "motivation": "The formula was right, but subtracting a per-row maximum either failed or broadcast in the wrong direction.",
+    "intuition": "Reducing (S, V) over the vocabulary gives (S, 1) with keepdim=True, or (S,) without it. Broadcasting aligns dimensions from the right. The singleton vocabulary axis tells the operation to reuse one number across each row.",
+    "takeaway": "Equal dimension sizes can hide an incorrect broadcast. A small example with different sequence and vocabulary sizes is a better check than relying on a large tensor that happens to run.",
+    "code": "shifted = logits - logits.amax(-1, keepdim=True)",
+    "reading": "PyTorch: Broadcasting semantics",
+    "url": "https://docs.pytorch.org/docs/stable/notes/broadcasting.html"
   },
   {
-    "category": "损失与数值",
-    "question": "softmax 已经减了最大值，为什么再取 log 还可能出问题？",
-    "answer": [
-      "减最大值主要防止 exp 上溢，但很小的概率仍可能下溢成 0。若先算概率再取 log，已经丢失的信息无法恢复。",
-      "例如 logits=[0,-1000]，第二类的真实 log 概率约为 -1000；浮点计算中 softmax 的第二项却可能成为 0。直接用 logsumexp 减去目标 logit，就不用先保存这个极小概率。"
-    ],
-    "code": "loss = torch.logsumexp(logits, dim=-1) - target_logit"
+    "slug": "log-softmax",
+    "title": "Why can a stable softmax still produce log(0)?",
+    "motivation": "I had already subtracted the maximum. Why was taking the logarithm still unsafe?",
+    "intuition": "Subtracting the maximum prevents exponential overflow; a sufficiently small probability can still underflow to zero. For logits [0, -1000], the second log probability should be approximately -1000, even if the probability itself cannot be represented.",
+    "takeaway": "Stay in log space. Computing logsumexp minus the target logit avoids materializing a tiny probability only to take its logarithm. The order of operations matters even when two formulas are algebraically identical.",
+    "code": "loss = torch.logsumexp(logits, -1) - target_logit",
+    "reading": "PyTorch: log_softmax",
+    "url": "https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.log_softmax.html"
   },
   {
-    "category": "损失与数值",
-    "question": "RMSNorm 为什么不能直接用 torch.var？",
-    "answer": [
-      "RMSNorm 归一化的是均方根：sqrt(mean(x²)+eps)。方差先减去均值，测量的是围绕均值的波动，数学对象不同。",
-      "例如 x=[2,2]，均方根是 2，方差却是 0。把 var 放进 RMSNorm，即使关闭无偏修正也不对。实现时还要注意 eps 在根号内，以及低精度输入用 float32 做归约。"
-    ],
-    "code": "y = x * rsqrt(mean(x*x) + eps) * weight"
+    "slug": "rmsnorm",
+    "title": "Why is variance the wrong denominator for RMSNorm?",
+    "motivation": "My outputs were consistently close to the reference, but not close enough. Increasing the tolerance would have hidden the actual mistake.",
+    "intuition": "RMSNorm uses sqrt(mean(x squared) + epsilon). Variance first subtracts the mean and measures a different quantity. For [2, 2], the RMS is 2 while the variance is zero.",
+    "takeaway": "Normalization is not one interchangeable operation. The exact statistic, epsilon placement, and accumulation precision are part of the layer definition. Here, I want a scale estimate without centering the vector.",
+    "code": "y = x * rsqrt(mean(x*x) + eps) * weight",
+    "reading": "Root Mean Square Layer Normalization",
+    "url": "https://arxiv.org/abs/1910.07467"
   },
   {
-    "category": "训练与架构",
-    "question": "Adam 的“初始化修正”和“归一化”是同一回事吗？",
-    "answer": [
-      "不是。m 和 v 从 0 开始，前几步的指数移动平均会偏向 0。偏差修正除以 1−βᵗ，是为了补偿这一初始化效应。",
-      "另一步是用 sqrt(v_hat)+eps 缩放 m_hat，让每个参数根据自己的历史梯度平方尺度调整步长。比如梯度始终为 2、β₁=0.9，第一步 m=0.2，修正后 m_hat=2。这里不是把所有参数的梯度统一归一化到长度 1。"
-    ],
-    "code": "m_hat = m / (1 - beta1**t)\nv_hat = v / (1 - beta2**t)\nupdate = lr * m_hat / (sqrt(v_hat) + eps)"
+    "slug": "adam",
+    "title": "Are Adam\u2019s bias correction and normalization the same thing?",
+    "motivation": "I understood the recursive compression of past gradients. The initialization correction and the second-moment denominator were the parts I kept mixing up.",
+    "intuition": "The moving averages start at zero, so their early values are biased toward zero. Dividing by 1 minus beta to the power t corrects that effect. With a constant gradient of 2 and beta1=0.9, the first moment is initially 0.2; correction brings it to 2.",
+    "takeaway": "Dividing the corrected first moment by the square root of the corrected second moment is a separate operation: it scales each coordinate using its own gradient history. It does not normalize the entire gradient vector to unit length.",
+    "code": "m_hat = m / (1 - beta1**t)\nstep = lr * m_hat / (sqrt(v_hat) + eps)",
+    "reading": "Adam: A Method for Stochastic Optimization",
+    "url": "https://arxiv.org/abs/1412.6980"
   },
   {
-    "category": "训练与架构",
-    "question": "残差块写成一个长表达式，会不会把 attention 算两遍？",
-    "answer": [
-      "会。若在两个子表达式里都调用 attention(norm(x))，框架通常会执行两次调用，不会自动把它们当成公共子表达式缓存。",
-      "pre-norm block 可以明确分两步：先得到 attention 残差后的 h，再把 h 送入第二个 norm 和 FFN。这样既清楚又避免重复计算；有随机操作时，两次调用甚至未必相同。"
-    ],
-    "code": "h = x + attention(norm1(x))\ny = h + ffn(norm2(h))"
+    "slug": "pre-norm",
+    "title": "Can a compact residual expression run attention twice?",
+    "motivation": "I wrote the Transformer block as one long expression, then realized the attention call appeared in two different places.",
+    "intuition": "Repeated function calls generally mean repeated computation. Compute the attention residual once, store the resulting hidden state, and feed that state to the second normalization and the feed-forward network.",
+    "takeaway": "This also exposes the pre-norm structure: normalization is inside each residual branch. A short intermediate variable can express the architecture more accurately than an impressive-looking one-liner.",
+    "code": "h = x + attention(norm1(x))\ny = h + ffn(norm2(h))",
+    "reading": "On Layer Normalization in the Transformer Architecture",
+    "url": "https://arxiv.org/abs/2002.04745"
   },
   {
-    "category": "表示与状态",
-    "question": "最后一层 hidden state 和词表 logits，不就是差一次矩阵乘法吗？",
-    "answer": [
-      "是，最后一层输出经过最终归一化后，通常通过线性投影得到词表 logits。但 logits 仍是一整组连续数；从它们采样或 argmax 得到一个 token，才是明显的信息压缩步骤。",
-      "不能笼统说 hidden state 一定比完整 logits 信息更多：若输出矩阵满列秩且已知，精确 logits 在数学上可能足以恢复输入向量。实际区别还涉及维度、数值精度、接收模型接口和训练目标。连续向量也不会自动成为一个好的通信消息。"
-    ],
-    "code": "h ∈ R^D → logits = W_out h ∈ R^V → token_id"
+    "slug": "hidden-state-logits",
+    "title": "Is a hidden state really richer than the logits?",
+    "motivation": "In our discussion of latent communication, I objected that the final hidden state was only one matrix multiplication away from vocabulary scores.",
+    "intuition": "That objection matters. If the output matrix has full column rank, exact logits can mathematically determine its input vector. The obvious compression occurs when we sample or take argmax and retain only one token.",
+    "takeaway": "The useful comparison is not simply hidden state versus logits. It is continuous representation versus a selected token, together with the receiving model\u2019s interface, precision, and training objective. A vector is not automatically a useful message.",
+    "code": "h in R^D -> W_out h in R^V -> one token",
+    "reading": "Using the Output Embedding to Improve Language Models",
+    "url": "https://arxiv.org/abs/1608.05859"
   },
   {
-    "category": "表示与状态",
-    "question": "最后一个 token 看过整个前缀，就等于整个前缀的总结吗？",
-    "answer": [
-      "不等于。“可以关注前缀”说明信息通路存在，不保证模型把所有有用信息都编码到了最后一个向量里。下一词预测训练主要奖励有助于预测的表示。",
-      "如果把这个向量当通信内容，需要用接收方任务来检验：与文本消息、多位置表示、随机向量相比如何？删掉或者打乱消息会怎样？是否需要通信相关的训练目标？能访问历史，和能充分总结历史，是两种不同的能力。"
-    ],
-    "code": ""
+    "slug": "prefix-summary",
+    "title": "Does seeing the whole prefix make the last state a summary?",
+    "motivation": "I was skeptical of treating the final token representation as a complete message about everything that came before it.",
+    "intuition": "Attention provides a path to earlier positions, not a guarantee that their useful information survives in a single vector. Next-token training rewards predictive representations, which need not preserve every fact a different agent might need.",
+    "takeaway": "A communication claim needs a receiver-side test: compare text, single-position vectors, and multiple-position representations; remove or shuffle messages. Access to information and a sufficient summary are different capabilities.",
+    "code": "",
+    "reading": "Attention Is All You Need \u2014 architectural background",
+    "url": "https://arxiv.org/abs/1706.03762"
   },
   {
-    "category": "表示与状态",
-    "question": "steering 撤掉以后，第一个生成词为什么还不能证明残留？",
-    "answer": [
-      "因为自回归预测错开一位。长度为 L 的 prompt，最后一个位置的 logits 用来生成第一个新 token；如果 prompt 阶段仍开着 steering，这个 token 就仍来自受干预的计算。",
-      "第一个新 token 被送回模型之后产生的 logits，才预测第二个新 token。研究撤掉后的状态效应，还要控制第一个 token 本身改变了后续上下文这个因素。固定 token 序列评分与自由生成回答的是不同问题。"
-    ],
-    "code": "prompt position L-1 → generated token 1\ngenerated token 1 position → generated token 2"
+    "slug": "steering-off",
+    "title": "Why does the first token after switch-off not prove persistence?",
+    "motivation": "In my steering experiments, the first generated token seemed to retain the intervention. The timing turned out to be crucial.",
+    "intuition": "The logits at the last prompt position predict the first new token. If steering was active over that prompt position, that prediction still came from steered computation. The next unsteered forward position predicts the second generated token.",
+    "takeaway": "There is another complication: the first selected token can itself change the future context. Fixed-token scoring and free generation therefore answer different questions. This alignment check came from the experiment; the paper below is background on activation steering.",
+    "code": "last prompt position -> token 1\ntoken 1 position -> token 2",
+    "reading": "Steering Language Models With Activation Engineering",
+    "url": "https://arxiv.org/abs/2308.10248"
   },
   {
-    "category": "表示与状态",
-    "question": "KV cache 是输入的信息，还是参数的信息？",
-    "answer": [
-      "两者共同决定。某一层的 K、V 由该层的 hidden states 和投影权重计算得到，而 hidden states 又依赖输入以及前面各层的计算。",
-      "因此，同一串 token 换一套参数，缓存可能改变；同一套参数换输入，缓存也可能改变。复用旧缓存是否可行，取决于改了什么以及误差会怎样传播，不能把它当作完全独立于模型的文本存储。"
-    ],
-    "code": "K_l = H_l W_K,l\nV_l = H_l W_V,l"
+    "slug": "cache-and-weights",
+    "title": "Does a KV cache belong to the input or the model?",
+    "motivation": "My adapter experiments kept running into the same question: what exactly becomes stale when the weights change?",
+    "intuition": "Both determine the cache. Keys and values are projections of hidden states, and those hidden states depend on the prefix and earlier model computations. Keeping the tokens fixed does not guarantee the same cached tensors under different parameters.",
+    "takeaway": "The useful experiment crosses the current reader with the model that wrote the cache. It separates present parameter effects from historical computation. LoRA provides background on parameter adaptation; it does not itself establish that an old cache can be reused safely.",
+    "code": "K_l = H_l W_K,l\nV_l = H_l W_V,l",
+    "reading": "LoRA: Low-Rank Adaptation of Large Language Models",
+    "url": "https://arxiv.org/abs/2106.09685"
   },
   {
-    "category": "项目延伸",
-    "question": "embedding 和输出头共享权重，究竟共享了什么？",
-    "answer": [
-      "输入查表与输出词表投影使用同一个 Parameter，而不是两张初值相同的表。词表大小 V、模型宽度 D 时，相比独立输出头可少 V×D 个参数（无 bias 时）。",
-      "梯度会从输入和输出两条计算路径汇总到同一个参数上。它约束两种用途共用一个表示空间，但不能保证质量提升。当前项目用参数身份、参数量差值和存档恢复检查这一点。"
-    ],
-    "code": "lm_head.weights = token_embeddings.weight"
+    "slug": "weight-tying",
+    "title": "What do tied embeddings actually share?",
+    "motivation": "Using the embedding transpose as the output projection looks almost too simple. I wanted to pin down what changes in training.",
+    "intuition": "The lookup table and output projection refer to the same Parameter, not two tables initialized with equal values. For vocabulary V and width D, this removes one V-by-D matrix relative to an independent bias-free output head.",
+    "takeaway": "Gradients from both computational paths accumulate into that parameter. Sharing constrains the input and output representations to use one table; fewer parameters alone do not guarantee better quality.",
+    "code": "lm_head.weights = token_embeddings.weight",
+    "reading": "Using the Output Embedding to Improve Language Models",
+    "url": "https://arxiv.org/abs/1608.05859"
   },
   {
-    "category": "项目延伸",
-    "question": "MoE 的 top-k 到底在选词，还是在选网络？",
-    "answer": [
-      "选的是专家网络。每个 token 的 hidden state 经过 router 得到专家分数，选中 k 个 SwiGLU 专家，把它们的输出按路由权重相加。它与从词表里挑 top-k token 的采样不是一回事。",
-      "总参数量包含所有专家；单个 token 只经过其中一部分。参数变多不等于速度一定快：分发、聚合、负载不均衡和硬件利用率都影响实际速度。本项目采用显式 sparse dispatch，便于检查计算过程。"
-    ],
-    "code": "token hidden state → router → selected experts → weighted sum"
+    "slug": "moe-routing",
+    "title": "Does top-k MoE select tokens or networks?",
+    "motivation": "The same phrase, top-k, appears in both sampling and mixture-of-experts routing. They select completely different things.",
+    "intuition": "For MoE, each token\u2019s hidden state produces scores over expert networks. The router selects k experts, runs them, and combines their outputs. Sampling top-k instead restricts vocabulary candidates for the next token.",
+    "takeaway": "Total parameters include all experts, while a token activates only some of them. Actual speed also depends on dispatch, load balance, and hardware utilization. Switch Transformers is useful sparse-routing background, although it uses top-1 routing rather than this project\u2019s top-2 setup.",
+    "code": "hidden state -> router -> selected experts -> weighted sum",
+    "reading": "Switch Transformers",
+    "url": "https://arxiv.org/abs/2101.03961"
   }
 ]
